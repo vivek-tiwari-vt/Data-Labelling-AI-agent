@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 # Add the parent directory to the path to import common modules
 sys.path.append(os.path.join(os.path.dirname(__file__), '../..'))
 
-from common.job_logger import job_logger
+from infrastructure.monitoring.job_logger import job_logger
 
 router = APIRouter()
 
@@ -226,7 +226,9 @@ async def get_logging_analytics():
                 "total_jobs": 0,
                 "system_performance": {},
                 "label_analytics": {},
-                "error_analytics": {}
+                "error_analytics": {},
+                "model_analytics": {},
+                "recent_activity": []
             }
         
         # Calculate system performance metrics
@@ -237,6 +239,8 @@ async def get_logging_analytics():
         # Get detailed logs for completed jobs to calculate performance
         processing_times = []
         text_counts = []
+        confidence_scores = []
+        model_usage = {}
         
         for job in completed_jobs[:20]:  # Sample last 20 completed jobs
             job_log = job_logger.get_job_log(job["job_id"])
@@ -246,9 +250,23 @@ async def get_logging_analytics():
                 if perf_time > 0 and text_count > 0:
                     processing_times.append(perf_time)
                     text_counts.append(text_count)
+                
+                # Collect confidence scores
+                text_agent_data = job_log.get("text_agent", {})
+                processing_details = text_agent_data.get("processing_details", [])
+                for detail in processing_details:
+                    confidence = detail.get("confidence_score", 0)
+                    if confidence > 0:
+                        confidence_scores.append(confidence)
+                
+                # Track model usage
+                models_used = job_log.get("ai_models", {}).get("models_used", [])
+                for model in models_used:
+                    model_usage[model] = model_usage.get(model, 0) + 1
         
         avg_processing_time = sum(processing_times) / len(processing_times) if processing_times else 0
         avg_text_count = sum(text_counts) / len(text_counts) if text_counts else 0
+        avg_confidence = sum(confidence_scores) / len(confidence_scores) if confidence_scores else 0
         
         # Label usage analytics
         all_labels = []
@@ -261,6 +279,28 @@ async def get_logging_analytics():
         
         most_used_labels = sorted(label_counts.items(), key=lambda x: x[1], reverse=True)[:10]
         
+        # Error analysis
+        error_types = {}
+        for job in failed_jobs:
+            job_log = job_logger.get_job_log(job["job_id"])
+            if job_log:
+                errors = job_log.get("errors", [])
+                for error in errors:
+                    error_type = error.get("error_type", "unknown")
+                    error_types[error_type] = error_types.get(error_type, 0) + 1
+        
+        # Time-based analytics
+        from datetime import datetime, timedelta
+        now = datetime.now()
+        
+        # Jobs in last 24 hours
+        recent_24h = [job for job in recent_jobs 
+                     if datetime.fromisoformat(job.get("created", "2024-01-01")).replace(tzinfo=None) > (now - timedelta(hours=24))]
+        
+        # Jobs in last 7 days
+        recent_7d = [job for job in recent_jobs 
+                    if datetime.fromisoformat(job.get("created", "2024-01-01")).replace(tzinfo=None) > (now - timedelta(days=7))]
+        
         return {
             "total_jobs": total_jobs,
             "system_performance": {
@@ -268,14 +308,31 @@ async def get_logging_analytics():
                 "failure_rate": len(failed_jobs) / total_jobs * 100 if total_jobs > 0 else 0,
                 "average_processing_time_ms": round(avg_processing_time, 2),
                 "average_texts_per_job": round(avg_text_count, 2),
+                "average_confidence_score": round(avg_confidence, 3),
                 "completed_jobs": len(completed_jobs),
                 "failed_jobs": len(failed_jobs),
-                "pending_jobs": total_jobs - len(completed_jobs) - len(failed_jobs)
+                "pending_jobs": total_jobs - len(completed_jobs) - len(failed_jobs),
+                "throughput_24h": len(recent_24h),
+                "throughput_7d": len(recent_7d)
             },
             "label_analytics": {
                 "total_unique_labels": len(label_counts),
                 "most_used_labels": most_used_labels,
-                "label_usage_distribution": label_counts
+                "label_usage_distribution": label_counts,
+                "average_labels_per_job": len(all_labels) / total_jobs if total_jobs > 0 else 0
+            },
+            "model_analytics": {
+                "model_usage_distribution": model_usage,
+                "most_used_models": sorted(model_usage.items(), key=lambda x: x[1], reverse=True)[:5]
+            },
+            "error_analytics": {
+                "error_types": error_types,
+                "error_rate_by_type": {k: round(v/len(failed_jobs)*100, 2) for k, v in error_types.items()} if failed_jobs else {}
+            },
+            "time_analytics": {
+                "jobs_last_24h": len(recent_24h),
+                "jobs_last_7d": len(recent_7d),
+                "peak_usage_analysis": "Available with more historical data"
             },
             "recent_activity": recent_jobs[:10]
         }
@@ -335,4 +392,156 @@ async def search_job_logs(
         }
         
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to search logs: {str(e)}") 
+        raise HTTPException(status_code=500, detail=f"Failed to search logs: {str(e)}")
+
+@router.get("/logs/analytics/models")
+async def get_model_performance_analytics():
+    """Get detailed analytics about AI model performance across jobs."""
+    try:
+        recent_jobs = job_logger.list_recent_jobs(50)
+        
+        model_stats = {}
+        
+        for job in recent_jobs:
+            job_log = job_logger.get_job_log(job["job_id"])
+            if job_log and job.get("status") == "completed":
+                # Extract model information
+                mother_model = job_log.get("ai_models", {}).get("mother_ai_model", "unknown")
+                child_model = job_log.get("ai_models", {}).get("child_ai_model", "unknown")
+                
+                # Performance metrics
+                total_time = job_log.get("performance_metrics", {}).get("total_time_ms", 0)
+                total_texts = job_log.get("job_metadata", {}).get("total_texts", 0)
+                
+                # Confidence scores
+                processing_details = job_log.get("text_agent", {}).get("processing_details", [])
+                confidences = [detail.get("confidence_score", 0) for detail in processing_details]
+                avg_confidence = sum(confidences) / len(confidences) if confidences else 0
+                
+                # Update model stats
+                if child_model not in model_stats:
+                    model_stats[child_model] = {
+                        "usage_count": 0,
+                        "total_texts_processed": 0,
+                        "total_processing_time": 0,
+                        "confidence_scores": [],
+                        "success_count": 0
+                    }
+                
+                model_stats[child_model]["usage_count"] += 1
+                model_stats[child_model]["total_texts_processed"] += total_texts
+                model_stats[child_model]["total_processing_time"] += total_time
+                model_stats[child_model]["confidence_scores"].extend(confidences)
+                model_stats[child_model]["success_count"] += 1
+        
+        # Calculate aggregated metrics
+        for model, stats in model_stats.items():
+            if stats["usage_count"] > 0:
+                stats["avg_processing_time_per_text"] = (
+                    stats["total_processing_time"] / stats["total_texts_processed"]
+                    if stats["total_texts_processed"] > 0 else 0
+                )
+                stats["avg_confidence"] = (
+                    sum(stats["confidence_scores"]) / len(stats["confidence_scores"])
+                    if stats["confidence_scores"] else 0
+                )
+                stats["texts_per_minute"] = (
+                    stats["total_texts_processed"] / (stats["total_processing_time"] / 60000)
+                    if stats["total_processing_time"] > 0 else 0
+                )
+                # Remove raw confidence scores for cleaner response
+                del stats["confidence_scores"]
+        
+        return {
+            "model_performance": model_stats,
+            "summary": {
+                "total_models_used": len(model_stats),
+                "best_performing_model": max(model_stats.keys(), 
+                                           key=lambda k: model_stats[k]["avg_confidence"]) if model_stats else None,
+                "fastest_model": max(model_stats.keys(), 
+                                   key=lambda k: model_stats[k]["texts_per_minute"]) if model_stats else None
+            }
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get model analytics: {str(e)}")
+
+@router.get("/logs/analytics/confidence")
+async def get_confidence_analytics():
+    """Get analytics about AI classification confidence levels."""
+    try:
+        recent_jobs = job_logger.list_recent_jobs(30)
+        
+        all_confidences = []
+        confidence_by_label = {}
+        low_confidence_items = []
+        
+        for job in recent_jobs:
+            job_log = job_logger.get_job_log(job["job_id"])
+            if job_log and job.get("status") == "completed":
+                processing_details = job_log.get("text_agent", {}).get("processing_details", [])
+                
+                for detail in processing_details:
+                    confidence = detail.get("confidence_score", 0)
+                    label = detail.get("assigned_label", "unknown")
+                    
+                    all_confidences.append(confidence)
+                    
+                    if label not in confidence_by_label:
+                        confidence_by_label[label] = []
+                    confidence_by_label[label].append(confidence)
+                    
+                    # Track low confidence items for review
+                    if confidence < 0.7:
+                        low_confidence_items.append({
+                            "job_id": job["job_id"],
+                            "text_preview": detail.get("content_preview", ""),
+                            "assigned_label": label,
+                            "confidence": confidence,
+                            "reasoning": detail.get("classification_reasoning", "")
+                        })
+        
+        # Calculate statistics
+        if all_confidences:
+            avg_confidence = sum(all_confidences) / len(all_confidences)
+            high_confidence_count = len([c for c in all_confidences if c >= 0.8])
+            medium_confidence_count = len([c for c in all_confidences if 0.6 <= c < 0.8])
+            low_confidence_count = len([c for c in all_confidences if c < 0.6])
+        else:
+            avg_confidence = 0
+            high_confidence_count = medium_confidence_count = low_confidence_count = 0
+        
+        # Calculate confidence by label
+        label_confidence_stats = {}
+        for label, confidences in confidence_by_label.items():
+            label_confidence_stats[label] = {
+                "avg_confidence": sum(confidences) / len(confidences),
+                "min_confidence": min(confidences),
+                "max_confidence": max(confidences),
+                "sample_count": len(confidences)
+            }
+        
+        return {
+            "overall_stats": {
+                "average_confidence": round(avg_confidence, 3),
+                "total_classifications": len(all_confidences),
+                "high_confidence_rate": round(high_confidence_count / len(all_confidences) * 100, 2) if all_confidences else 0,
+                "medium_confidence_rate": round(medium_confidence_count / len(all_confidences) * 100, 2) if all_confidences else 0,
+                "low_confidence_rate": round(low_confidence_count / len(all_confidences) * 100, 2) if all_confidences else 0
+            },
+            "confidence_by_label": label_confidence_stats,
+            "confidence_distribution": {
+                "high_confidence": high_confidence_count,
+                "medium_confidence": medium_confidence_count,
+                "low_confidence": low_confidence_count
+            },
+            "low_confidence_items": low_confidence_items[:20],  # Top 20 items needing review
+            "recommendations": {
+                "items_for_manual_review": len(low_confidence_items),
+                "labels_needing_attention": [label for label, stats in label_confidence_stats.items() 
+                                           if stats["avg_confidence"] < 0.7]
+            }
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get confidence analytics: {str(e)}")

@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { Button } from '@/components/ui/button.jsx'
 import { Textarea } from '@/components/ui/textarea.jsx'
 import { Input } from '@/components/ui/input.jsx'
@@ -6,7 +6,10 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card.jsx'
 import { Progress } from '@/components/ui/progress.jsx'
 import { Badge } from '@/components/ui/badge.jsx'
-import { Loader2, FileText, CheckCircle, XCircle, Upload, Download, Bot, Brain } from 'lucide-react'
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs.jsx'
+import { Loader2, FileText, CheckCircle, XCircle, Upload, Download, Bot, Brain, BarChart3, Template, FileSpreadsheet } from 'lucide-react'
+import AnalyticsDashboard from './AnalyticsDashboard.jsx'
+import LabelTemplateManager from './LabelTemplateManager.jsx'
 
 const TextProcessor = () => {
   const [selectedFile, setSelectedFile] = useState(null)
@@ -19,6 +22,9 @@ const TextProcessor = () => {
   const [progress, setProgress] = useState(0)
   const [result, setResult] = useState(null)
   const [isProcessing, setIsProcessing] = useState(false)
+  const [activeTab, setActiveTab] = useState('process')
+  const [recentJobs, setRecentJobs] = useState([])
+  const [exportOptions, setExportOptions] = useState([])
 
   // Available model options
   const openRouterModels = [
@@ -29,13 +35,42 @@ const TextProcessor = () => {
   ]
 
   const geminiModels = [
-    { value: 'gemini-1.5-pro', label: 'Gemini 1.5 Pro' }
+    { value: 'gemini-2.0-flash', label: 'Gemini 2.0 Flash' }
   ]
 
   const allModels = [
     ...openRouterModels.map(model => ({ ...model, provider: 'openrouter' })),
     ...geminiModels.map(model => ({ ...model, provider: 'gemini' }))
   ]
+
+  // Load recent jobs on component mount
+  useEffect(() => {
+    fetchRecentJobs()
+  }, [])
+
+  const fetchRecentJobs = async () => {
+    try {
+      const response = await fetch('http://localhost:8000/api/v1/jobs/')
+      if (response.ok) {
+        const data = await response.json()
+        setRecentJobs(data.jobs || [])
+      }
+    } catch (error) {
+      console.error('Failed to fetch recent jobs:', error)
+    }
+  }
+
+  const fetchExportOptions = async (jobId) => {
+    try {
+      const response = await fetch(`http://localhost:8000/api/v1/jobs/${jobId}/export-options`)
+      if (response.ok) {
+        const data = await response.json()
+        setExportOptions(data.available_formats || [])
+      }
+    } catch (error) {
+      console.error('Failed to fetch export options:', error)
+    }
+  }
 
   const submitFileJob = async () => {
     if (!selectedFile || !availableLabels.trim() || !motherAiModel || !childAiModel) {
@@ -129,18 +164,39 @@ const TextProcessor = () => {
     if (!jobId) return
 
     try {
-      const response = await fetch(`http://localhost:8000/api/v1/jobs/${jobId}/download`)
-      const data = await response.json()
-      
-      const downloadUrl = `http://localhost:8000/api/v1/jobs/${jobId}/file`
-      const a = document.createElement('a')
-      a.href = downloadUrl
-      a.download = data.filename
-      document.body.appendChild(a)
-      a.click()
-      document.body.removeChild(a)
+      // Direct download using the /download endpoint
+      const link = document.createElement('a')
+      link.href = `http://localhost:8000/api/v1/jobs/${jobId}/download`
+      link.download = `job_${jobId}_labeled`  // Backend will set correct extension
+      document.body.appendChild(link)
+      link.click()
+      document.body.removeChild(link)
     } catch (error) {
       console.error('Error downloading result:', error)
+      alert('Error downloading result: ' + error.message)
+    }
+  }
+
+  const cancelJob = async () => {
+    if (!jobId || !isProcessing) return
+
+    try {
+      const response = await fetch(`http://localhost:8000/api/v1/jobs/${jobId}/cancel`, {
+        method: 'POST'
+      })
+
+      if (response.ok) {
+        const data = await response.json()
+        setJobStatus('cancelled')
+        setIsProcessing(false)
+        alert('Job cancelled successfully')
+      } else {
+        const errorData = await response.json()
+        alert('Failed to cancel job: ' + (errorData.detail || 'Unknown error'))
+      }
+    } catch (error) {
+      console.error('Error cancelling job:', error)
+      alert('Error cancelling job: ' + error.message)
     }
   }
 
@@ -160,6 +216,36 @@ const TextProcessor = () => {
     setProgress(0)
     setResult(null)
     setIsProcessing(false)
+  }
+
+  const handleTemplateSelect = (templateData) => {
+    setAvailableLabels(templateData.labels)
+    setInstructions(templateData.instructions)
+    setActiveTab('process') // Switch back to processing tab
+  }
+
+  const downloadExport = async (format) => {
+    if (!jobId) return
+
+    try {
+      const response = await fetch(`http://localhost:8000/api/v1/jobs/${jobId}/export/${format}`)
+      if (response.ok) {
+        const blob = await response.blob()
+        const url = window.URL.createObjectURL(blob)
+        const a = document.createElement('a')
+        a.href = url
+        a.download = `job_${jobId}_export.${format}`
+        document.body.appendChild(a)
+        a.click()
+        window.URL.revokeObjectURL(url)
+        document.body.removeChild(a)
+      } else {
+        alert('Failed to export file')
+      }
+    } catch (error) {
+      console.error('Export failed:', error)
+      alert('Export failed: ' + error.message)
+    }
   }
 
   const getStatusIcon = () => {
@@ -323,6 +409,15 @@ const TextProcessor = () => {
               )}
               {isProcessing ? 'Processing...' : 'Start Text Processing'}
             </Button>
+            {isProcessing && jobId && (
+              <Button 
+                variant="destructive" 
+                onClick={cancelJob}
+                className="flex items-center gap-2"
+              >
+                Cancel Job
+              </Button>
+            )}
             {(jobId || isProcessing) && (
               <Button variant="outline" onClick={resetForm}>
                 Reset
@@ -424,6 +519,126 @@ const TextProcessor = () => {
           </CardContent>
         </Card>
       )}
+
+      {/* Recent Jobs Section */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <FileSpreadsheet className="h-5 w-5" />
+            Recent Jobs
+          </CardTitle>
+          <CardDescription>
+            View and manage your recent text processing jobs
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          {recentJobs.length === 0 ? (
+            <p className="text-center text-gray-500 py-4">
+              No recent jobs found. Process a file to start.
+            </p>
+          ) : (
+            <div className="space-y-4">
+              {recentJobs.map((job) => (
+                <div key={job.id} className="p-4 bg-gray-50 rounded-lg shadow-sm">
+                  <div className="flex justify-between items-center">
+                    <div>
+                      <p className="text-sm font-medium">
+                        Job ID: {job.id}
+                      </p>
+                      <p className="text-xs text-gray-500">
+                        {new Date(job.created_at).toLocaleString()}
+                      </p>
+                    </div>
+                    <Badge variant={
+                      job.status === 'completed' ? 'default' : 
+                      job.status === 'failed' ? 'destructive' : 
+                      'secondary'
+                    }>
+                      {job.status}
+                    </Badge>
+                  </div>
+                  <div className="mt-2">
+                    <Button 
+                      onClick={() => {
+                        setJobId(job.id)
+                        setJobStatus(job.status)
+                        setProgress(job.progress)
+                        setResult(job.result)
+                        fetchExportOptions(job.id)
+                        setActiveTab('result')
+                      }}
+                      className="w-full"
+                    >
+                      View Details
+                    </Button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* Export Section */}
+      {jobId && exportOptions.length > 0 && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <Download className="h-5 w-5" />
+              Export Results
+            </CardTitle>
+            <CardDescription>
+              Download your results in various formats
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="grid grid-cols-2 gap-4">
+              {exportOptions.map((format) => (
+                <Button 
+                  key={format} 
+                  onClick={() => downloadExport(format)} 
+                  className="flex items-center justify-center gap-2"
+                >
+                  <Download className="h-4 w-4" />
+                  {format.toUpperCase()}
+                </Button>
+              ))}
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Template Manager Section */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <Template className="h-5 w-5" />
+            Label Template Manager
+          </CardTitle>
+          <CardDescription>
+            Create and manage label templates for consistent text classification
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <LabelTemplateManager onSelect={handleTemplateSelect} />
+        </CardContent>
+      </Card>
+
+      {/* Analytics Dashboard Section */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <BarChart3 className="h-5 w-5" />
+            Analytics Dashboard
+          </CardTitle>
+          <CardDescription>
+            Visualize and analyze your text classification results
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <AnalyticsDashboard jobId={jobId} />
+        </CardContent>
+      </Card>
     </div>
   )
 }

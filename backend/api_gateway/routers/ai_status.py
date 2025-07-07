@@ -6,8 +6,8 @@ import os
 # Add the parent directory to the path to import common modules
 sys.path.append(os.path.join(os.path.dirname(__file__), '../..'))
 
-from common.ai_client import AIClient, ModelProvider
-from common.config import settings
+from shared.utils.ai_client import AIClient, ModelProvider
+from infrastructure.config.config import settings
 
 router = APIRouter()
 ai_client = AIClient()

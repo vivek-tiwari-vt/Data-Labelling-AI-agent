@@ -1,10 +1,10 @@
-import TextProcessor from './components/TextLabeler.jsx'
+import ComprehensiveApp from './components/ComprehensiveApp.jsx'
 import './App.css'
 
 function App() {
   return (
     <div className="min-h-screen bg-gray-50">
-      <TextProcessor />
+      <ComprehensiveApp />
     </div>
   )
 }

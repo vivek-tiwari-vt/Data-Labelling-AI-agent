@@ -7,7 +7,7 @@ import os
 # Add the parent directory to the path to import common modules
 sys.path.append(os.path.join(os.path.dirname(__file__), '../..'))
 
-from common.redis_client import RedisClient
+from shared.messaging.redis_client import RedisClient
 
 router = APIRouter()
 

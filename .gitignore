@@ -188,3 +188,6 @@ rar/
 test_dataset.json
 test_dataset.csv
 test_dataset.xml
+
+# Embedded git repositories
+data/versioning/git_repo/

@@ -10,10 +10,10 @@ import os
 # Add the parent directory to the path to import common modules
 sys.path.append(os.path.join(os.path.dirname(__file__), '../..'))
 
-from common.redis_client import RedisClient
-from common.models import JobStatus, AgentTask
-from common.job_logger import job_logger
-from common.ai_client import AIClient
+from shared.messaging.redis_client import RedisClient
+from shared.database.models import JobStatus, AgentTask
+from infrastructure.monitoring.job_logger import job_logger
+from shared.utils.ai_client import AIClient
 
 class JobService:
     def __init__(self):
@@ -161,16 +161,51 @@ class JobService:
         return job_data.get("result")
 
     async def get_job_file(self, job_id: str) -> Optional[Path]:
-        """Gets the output file path for a completed job."""
-        # Check different possible file locations
-        possible_files = [
-            self.outputs_dir / f"job_{job_id}_labeled.json",
-            self.outputs_dir / f"job_{job_id}.json"
-        ]
+        """Gets the output file path for a completed job in the original format."""
+        # Get job metadata to determine original format
+        job_log = job_logger.get_job_log(job_id)
+        if not job_log:
+            return None
         
-        for file_path in possible_files:
-            if file_path.exists():
-                return file_path
+        # Get original file format from job metadata
+        file_data = job_log.get("user_input", {}).get("file_data", {})
+        if not file_data:
+            file_data = job_log.get("file_data", {})
+        
+        original_format = file_data.get("source_format", "json").lower()
+        
+        # Check for files in the original format first, then fallback to other formats
+        format_extensions = {
+            "json": [".json"],
+            "csv": [".csv"],
+            "xml": [".xml"]
+        }
+        
+        # Primary: look for files in original format
+        extensions_to_check = format_extensions.get(original_format, [".json"])
+        # Fallback: check all possible extensions if original format not found
+        all_extensions = [".json", ".csv", ".xml"]
+        
+        # First pass: check original format
+        for ext in extensions_to_check:
+            possible_files = [
+                self.outputs_dir / f"job_{job_id}_labeled{ext}",
+                self.outputs_dir / f"job_{job_id}{ext}"
+            ]
+            for file_path in possible_files:
+                if file_path.exists():
+                    return file_path
+        
+        # Second pass: check all formats as fallback
+        for ext in all_extensions:
+            if ext not in extensions_to_check:  # Skip already checked extensions
+                possible_files = [
+                    self.outputs_dir / f"job_{job_id}_labeled{ext}",
+                    self.outputs_dir / f"job_{job_id}{ext}"
+                ]
+                for file_path in possible_files:
+                    if file_path.exists():
+                        return file_path
         
         return None
 
@@ -223,4 +258,46 @@ class JobService:
             "most_common_labels": most_common_labels,
             "recent_activity": recent_jobs[:10]
         }
+
+    async def cancel_job(self, job_id: str) -> bool:
+        """Cancel a running job."""
+        try:
+            # Get current job status
+            job_data = self.redis_client.get_key(f"job:{job_id}")
+            if not job_data:
+                return False
+            
+            current_status = job_data.get("status")
+            if current_status in ["completed", "failed", "cancelled"]:
+                return False
+            
+            # Update job status to cancelled
+            job_data["status"] = "cancelled"
+            job_data["cancelled_at"] = datetime.now().isoformat()
+            self.redis_client.set_key(f"job:{job_id}", job_data)
+            
+            # Publish cancellation message to agents
+            cancellation_message = {
+                "job_id": job_id,
+                "action": "cancel",
+                "timestamp": datetime.now().isoformat()
+            }
+            
+            # Notify Mother AI and Text Agent
+            self.redis_client.publish_message("job_cancellations", cancellation_message)
+            
+            # Log the cancellation
+            job_logger.log_error(job_id, {
+                "error_type": "job_cancelled",
+                "error_message": "Job cancelled by user",
+                "cancelled_at": datetime.now().isoformat(),
+                "previous_status": current_status
+            })
+            
+            print(f"🚫 Job {job_id} cancelled by user")
+            return True
+            
+        except Exception as e:
+            print(f"❌ Failed to cancel job {job_id}: {e}")
+            return False
 

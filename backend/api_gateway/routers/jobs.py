@@ -10,7 +10,7 @@ import os
 # Add the parent directory to the path to import common modules
 sys.path.append(os.path.join(os.path.dirname(__file__), '../..'))
 
-from common.models import JobRequest, JobStatus
+from shared.database.models import JobRequest, JobStatus
 from services.job_service import JobService
 
 router = APIRouter()
@@ -41,7 +41,7 @@ async def upload_file_for_labeling(
     """Upload a file (JSON, CSV, or XML) for batch text classification."""
     try:
         # Import file manager
-        from common.file_manager import FileManager
+        from shared.storage.file_manager import FileManager
         file_manager = FileManager()
         
         # Validate file type
@@ -228,7 +228,7 @@ async def get_job_detailed_log(job_id: str):
 async def get_job_summary(job_id: str):
     """Get a summary of job processing."""
     try:
-        from common.job_logger import job_logger
+        from infrastructure.monitoring.job_logger import job_logger
         
         summary = job_logger.get_job_summary(job_id)
         if not summary:
@@ -263,4 +263,151 @@ async def get_job_analytics():
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to get analytics: {str(e)}")
+
+@router.get("/jobs/{job_id}/export/{format_type}")
+async def export_job_result(job_id: str, format_type: str):
+    """Export job results in various formats (xlsx, pdf, csv, json)."""
+    try:
+        # Import here to avoid dependency issues if packages not installed
+        try:
+            from core.jobs.exports.export_manager import export_manager
+        except ImportError as e:
+            raise HTTPException(
+                status_code=500, 
+                detail=f"Export functionality not available. Missing dependencies: {str(e)}"
+            )
+        
+        # Get job data
+        job_status = await job_service.get_job_status(job_id)
+        if not job_status:
+            raise HTTPException(status_code=404, detail="Job not found")
+        
+        if job_status.get("status") != "completed":
+            raise HTTPException(status_code=400, detail="Job must be completed to export")
+        
+        # Get detailed results
+        from infrastructure.monitoring.job_logger import job_logger
+        job_log = job_logger.get_job_log(job_id)
+        if not job_log:
+            raise HTTPException(status_code=404, detail="Job log not found")
+        
+        # Extract results and metadata
+        results = []
+        processing_details = job_log.get("text_agent", {}).get("processing_details", [])
+        
+        for detail in processing_details:
+            result = {
+                "id": detail.get("text_id", ""),
+                "content": detail.get("content_preview", ""),
+                "ai_assigned_label": detail.get("assigned_label", ""),
+                "confidence": detail.get("confidence_score", 0),
+                "reasoning": detail.get("classification_reasoning", ""),
+                "processing_time_ms": detail.get("processing_time_ms", 0)
+            }
+            results.append(result)
+        
+        # Prepare job metadata
+        job_metadata = {
+            "job_id": job_id,
+            "processing_timestamp": job_log.get("timestamps", {}).get("job_created", ""),
+            "total_texts": len(results),
+            "available_labels": job_log.get("user_input", {}).get("available_labels", []),
+            "success_rate": job_log.get("results", {}).get("success_rate", 100),
+            "processing_time_seconds": job_log.get("results", {}).get("processing_time_seconds", 0),
+            "mother_ai_model": job_log.get("ai_models", {}).get("mother_ai_model", "Unknown"),
+            "child_ai_model": job_log.get("ai_models", {}).get("child_ai_model", "Unknown"),
+            "user_instructions": job_log.get("user_input", {}).get("instructions", "")
+        }
+        
+        # Export to requested format
+        export_file = await export_manager.export_results(
+            job_id, results, job_metadata, format_type
+        )
+        
+        return FileResponse(
+            export_file,
+            media_type="application/octet-stream",
+            filename=Path(export_file).name
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to export results: {str(e)}")
+
+@router.get("/jobs/{job_id}/export-options")
+async def get_export_options(job_id: str):
+    """Get available export options for a job."""
+    try:
+        # Check if job exists and is completed
+        job_status = await job_service.get_job_status(job_id)
+        if not job_status:
+            raise HTTPException(status_code=404, detail="Job not found")
+        
+        if job_status.get("status") != "completed":
+            return {
+                "available_formats": [],
+                "message": "Job must be completed to access export options"
+            }
+        
+        # Check which export formats are available
+        available_formats = ["json", "csv"]  # Always available
+        
+        try:
+            import pandas as pd
+            import openpyxl
+            available_formats.append("xlsx")
+        except ImportError:
+            pass
+        
+        try:
+            import reportlab
+            available_formats.append("pdf")
+        except ImportError:
+            pass
+        
+        return {
+            "job_id": job_id,
+            "available_formats": available_formats,
+            "format_descriptions": {
+                "json": "Enhanced JSON with analytics and metadata",
+                "csv": "CSV with additional job metadata columns",
+                "xlsx": "Excel workbook with multiple sheets and analytics",
+                "pdf": "Professional PDF report with visualizations"
+            }
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get export options: {str(e)}")
+
+@router.post("/jobs/{job_id}/cancel")
+async def cancel_job(job_id: str):
+    """Cancel a running job."""
+    try:
+        # Get current job status
+        job_status = await job_service.get_job_status(job_id)
+        if not job_status:
+            raise HTTPException(status_code=404, detail="Job not found")
+        
+        current_status = job_status.get("status")
+        if current_status in ["completed", "failed", "cancelled"]:
+            raise HTTPException(status_code=400, detail=f"Cannot cancel job with status: {current_status}")
+        
+        # Cancel the job
+        success = await job_service.cancel_job(job_id)
+        if success:
+            return {
+                "job_id": job_id,
+                "status": "cancelled",
+                "message": "Job cancelled successfully"
+            }
+        else:
+            raise HTTPException(status_code=500, detail="Failed to cancel job")
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to cancel job: {str(e)}")
 

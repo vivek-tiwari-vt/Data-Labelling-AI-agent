@@ -8,10 +8,10 @@ import traceback
 # Add the parent directory to the path to import common modules
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 
-from common.redis_client import RedisClient
-from common.models import JobStatus
-from common.ai_client import AIClient
-from common.job_logger import job_logger
+from shared.messaging.redis_client import RedisClient
+from shared.database.models import JobStatus
+from shared.utils.ai_client import AIClient
+from infrastructure.monitoring.job_logger import job_logger
 
 class MotherAI:
     def __init__(self):
@@ -71,15 +71,15 @@ class MotherAI:
         print(f"📁 File: {original_filename}")
         print(f"🏷️  Available labels: {', '.join(available_labels)}")
         print(f"📝 User instructions: {user_instructions}")
-        print(f"🤖 Mother AI model: {mother_ai_model}")
-        print(f"👶 Child AI model: {child_ai_model}")
+        print(f"🤖 Mother AI model: {mother_ai_model} (will be used for content analysis & instruction generation)")
+        print(f"👶 Child AI model: {child_ai_model} (will be used for individual text classification)")
         
-        # Perform content analysis
-        content_analysis = await self.perform_content_analysis(file_data, available_labels)
+        # Perform content analysis using the selected Mother AI model
+        content_analysis = await self.perform_content_analysis(file_data, available_labels, mother_ai_model)
         
-        # Create intelligent instructions
+        # Create intelligent instructions using the selected Mother AI model
         enhanced_instructions = await self.create_intelligent_instructions(
-            file_data, available_labels, user_instructions, content_analysis
+            file_data, available_labels, user_instructions, content_analysis, mother_ai_model
         )
         
         # Log Mother AI processing details
@@ -154,117 +154,192 @@ class MotherAI:
         self.redis_client.publish_message("text_agent_jobs", text_agent_task)
         print(f"📤 Mother AI dispatched single text task to Text Agent for job {job_id}")
 
-    async def perform_content_analysis(self, file_data: dict, available_labels: list) -> dict:
-        """Simple content analysis for classification guidance."""
+    async def perform_content_analysis(self, file_data: dict, available_labels: list, mother_ai_model: str) -> dict:
+        """Perform AI-powered content analysis using the selected Mother AI model."""
         test_texts = file_data.get("test_texts", [])
         
-        # Basic analysis without AI call for performance
+        # Sample a few texts for analysis (to keep costs reasonable)
+        sample_size = min(5, len(test_texts))
+        sample_texts = test_texts[:sample_size]
+        sample_content = "\n\n".join([f"Text {i+1}: {text.get('content', '')[:200]}..." 
+                                     for i, text in enumerate(sample_texts)])
+        
+        analysis_prompt = f"""Analyze this sample of {sample_size} texts from a dataset of {len(test_texts)} texts that need to be classified into these labels: {', '.join(available_labels)}
+
+SAMPLE TEXTS:
+{sample_content}
+
+AVAILABLE LABELS: {', '.join(available_labels)}
+
+Provide a JSON response with:
+1. "content_patterns": What types of content patterns do you see?
+2. "label_strategies": For each label, what specific characteristics should guide classification?
+3. "classification_methodology": What approach should be used for accurate classification?
+4. "key_indicators": What are the key indicators that distinguish between labels?
+
+Respond with valid JSON only."""
+
+        try:
+            print(f"🧠 Mother AI ({mother_ai_model}) analyzing content sample...")
+            
+            ai_response = await self.ai_client.chat_completion(
+                messages=[{"role": "user", "content": analysis_prompt}],
+                max_tokens=1000,
+                temperature=0.3,
+                model=mother_ai_model
+            )
+            
+            ai_content = ai_response.get("content", "")
+            print(f"✅ Mother AI analysis received: {len(ai_content)} characters")
+            
+            # Try to parse AI response as JSON
+            try:
+                import json
+                import re
+                
+                # Try to extract JSON from the response
+                json_match = re.search(r'\{.*\}', ai_content, re.DOTALL)
+                if json_match:
+                    analysis_result = json.loads(json_match.group())
+                else:
+                    analysis_result = json.loads(ai_content)
+                
+                # Add metadata
+                analysis_result.update({
+                    "total_texts": len(test_texts),
+                    "sample_size": sample_size,
+                    "available_labels": available_labels,
+                    "analysis_timestamp": datetime.now().isoformat(),
+                    "mother_ai_model_used": mother_ai_model
+                })
+                
+                print(f"✅ Content analysis completed using {mother_ai_model}")
+                return analysis_result
+                
+            except (json.JSONDecodeError, AttributeError) as e:
+                print(f"⚠️  Failed to parse AI analysis, using fallback: {e}")
+                # Fallback to basic analysis if AI response parsing fails
+                pass
+                
+        except Exception as e:
+            print(f"⚠️  AI content analysis failed, using fallback: {e}")
+            # Continue with fallback if AI call fails
+            pass
+        
+        # Fallback analysis
         analysis_data = {
+            "content_patterns": "Mixed content types requiring intelligent classification",
+            "label_strategies": {label: f"Classify content as '{label}' based on semantic meaning and context" for label in available_labels},
+            "classification_methodology": "Pure AI semantic classification with contextual understanding",
+            "key_indicators": "Text purpose, content type, authorial intent, and semantic context",
             "total_texts": len(test_texts),
+            "sample_size": sample_size,
             "available_labels": available_labels,
-            "label_strategies": {label: f"Classify content as '{label}' based on semantic meaning" for label in available_labels},
-            "classification_methodology": "Pure AI semantic classification",
-            "analysis_timestamp": datetime.now().isoformat()
+            "analysis_timestamp": datetime.now().isoformat(),
+            "mother_ai_model_used": f"{mother_ai_model} (fallback used)"
         }
         
-        print(f"✅ Content analysis completed for {len(test_texts)} texts")
+        print(f"✅ Content analysis completed (fallback mode)")
         return analysis_data
 
     async def create_intelligent_instructions(self, file_data: dict, available_labels: list, 
-                                            user_instructions: str, content_analysis: dict) -> str:
-        """Create enhanced human-like classification instructions for Text Agent."""
+                                            user_instructions: str, content_analysis: dict, mother_ai_model: str) -> str:
+        """Create AI-enhanced classification instructions using the selected Mother AI model."""
         
+        # Try to create AI-enhanced instructions first
+        instruction_prompt = f"""You are creating detailed classification instructions for another AI agent that will classify {len(file_data.get('test_texts', []))} texts into these labels: {', '.join(available_labels)}
+
+USER INSTRUCTIONS: {user_instructions}
+
+CONTENT ANALYSIS RESULTS:
+- Content patterns found: {content_analysis.get('content_patterns', 'Mixed content')}
+- Classification methodology: {content_analysis.get('classification_methodology', 'Semantic analysis')}
+- Key indicators: {content_analysis.get('key_indicators', 'Context and purpose')}
+
+Create comprehensive classification instructions that will guide the Child AI to make accurate decisions. Include:
+1. Clear decision criteria for each label
+2. Examples of what qualifies for each category
+3. How to handle edge cases and ambiguous content
+4. Specific reasoning patterns to follow
+
+The instructions should be detailed enough that another AI can consistently apply them across the entire dataset."""
+
+        try:
+            print(f"🧠 Mother AI ({mother_ai_model}) creating enhanced instructions...")
+            
+            ai_response = await self.ai_client.chat_completion(
+                messages=[{"role": "user", "content": instruction_prompt}],
+                max_tokens=2000,
+                temperature=0.2,
+                model=mother_ai_model
+            )
+            
+            ai_instructions = ai_response.get("content", "")
+            print(f"✅ AI-enhanced instructions created: {len(ai_instructions)} characters")
+            
+            # Combine AI instructions with metadata
+            enhanced_instructions = f"""
+AI-Enhanced Classification Instructions (Generated by {mother_ai_model}):
+
+{ai_instructions}
+
+METADATA:
+- Total texts to process: {len(file_data.get('test_texts', []))}
+- Available labels: {', '.join(available_labels)}
+- User instructions: {user_instructions}
+- Analysis model: {mother_ai_model}
+- Generated: {datetime.now().isoformat()}
+"""
+            
+            return enhanced_instructions
+            
+        except Exception as e:
+            print(f"⚠️  AI instruction generation failed, using fallback: {e}")
+            # Continue with fallback instructions
+            pass
+        
+        # Fallback to static instructions if AI call fails
         instructions = f"""
-Enhanced Classification Instructions for Child AI Agent:
+Enhanced Classification Instructions for Child AI Agent (Fallback Mode):
 
 USER INSTRUCTIONS: {user_instructions}
 AVAILABLE LABELS: {', '.join(available_labels)}
 
-You are an expert human data labeler with decades of experience in content classification. Your classification decisions must demonstrate the same nuanced understanding, contextual awareness, and thoughtful reasoning that a seasoned human expert would apply.
+You are an expert human data labeler with decades of experience in content classification. Your classification decisions must demonstrate the same nuanced understanding and contextual awareness that a seasoned human expert would apply.
 
 CORE CLASSIFICATION PHILOSOPHY:
 
-1. **Multi-Layer Content Understanding**:
-   - **Surface Layer**: What words and phrases are present?
-   - **Intent Layer**: Why was this text written? What is the author trying to accomplish?
-   - **Function Layer**: How would this text be used or consumed by readers?
-   - **Context Layer**: What situational factors influence the meaning?
+1. **Three-Layer Content Analysis**:
+   - **Surface Layer**: What is explicitly stated?
+   - **Intent Layer**: Why was this written? What's the author's goal?
+   - **Function Layer**: How would this be used/organized by readers?
    
-   Always prioritize deeper layers over surface-level keyword matching.
+   Always prioritize intent and function over surface-level keywords.
 
-2. **Human Expert Reasoning Process**:
-   Before labeling, mentally walk through this thought process:
-   
-   a) **Initial Impression**: "What is my immediate sense of what this text is about?"
-   b) **Purpose Analysis**: "What is the author's primary goal in writing this?"
-   c) **Audience Consideration**: "Who is this intended for and why?"
-   d) **Content vs Container**: "What is the substance versus the format/medium?"
-   e) **Label Justification**: "Can I explain why this label fits better than any other?"
+2. **Expert Decision Process**:
+   For each text, determine:
+   a) **Primary Purpose**: What is the author's main communicative goal?
+   b) **Functional Role**: Where would this naturally belong in an organized system?
+   c) **Best Label**: Which captures the essential nature, not secondary elements?
 
-3. **Advanced Decision Framework**:
+3. **Quality Verification**:
+   Apply the "filing cabinet test": In a well-organized system, where would this naturally belong?
+   Use the "expert consensus test": Would other experts immediately understand this choice?
+
+4. **Advanced Pattern Recognition**:
+   **Avoid Common Traps**:
+   - Content ABOUT topic X ≠ content OF category X
+   - Format similarity ≠ content category similarity
+   - Emotional expressions should be classified by communicative function
+   - Personal experiences ≠ reviews (even when opinion-based)
    
-   **When Multiple Labels Seem Applicable**:
-   - Identify the text's PRIMARY function (what would happen if you removed secondary elements?)
-   - Ask: "If I could only communicate ONE thing about this text's purpose, what would it be?"
-   - Consider temporal context: What is the immediate vs. long-term purpose?
-   
-   **For Ambiguous Content**:
+   **When Multiple Labels Apply**:
+   - Choose the PRIMARY function, not secondary elements
    - Focus on authorial intent over reader interpretation
-   - Consider the most specific applicable label rather than generic ones
-   - Think about conventional human categorization patterns
-   
-   **For Complex Multi-Topic Content**:
-   - Identify the organizational structure: Is this primarily X with elements of Y, or vice versa?
-   - Determine what would be lost if you moved this text to a different category
-   - Consider what aspects would matter most to someone organizing or searching for this content
+   - Consider conventional human categorization patterns
 
-4. **Expert-Level Quality Controls**:
-   
-   **Before Final Decision**:
-   - Perform a "mental file test": In a well-organized filing system, where would this naturally belong?
-   - Apply the "colleague test": Would another expert immediately understand why you chose this label?
-   - Use the "utility test": Does this labeling serve the end user's likely needs and expectations?
-   
-   **Consistency Verification**:
-   - Are you applying the same decision criteria across similar texts?
-   - Are you maintaining appropriate granularity (not too broad, not over-specific)?
-   - Are you avoiding classification drift as you progress through the dataset?
-
-5. **Sophisticated Pattern Recognition**:
-   
-   **Recognize Common Misclassification Traps**:
-   - Content ABOUT topic X is not always OF category X (discussing technology ≠ technology content)
-   - Emotional expressions about subjects should be classified by their communicative function, not their emotional content
-   - Format similarities don't determine content categories (questions can serve many different purposes)
-   - Context matters more than vocabulary overlap
-   
-   **Apply Contextual Intelligence**:
-   - Personal experiences are different from reviews, even when they express opinions
-   - Informational content serves different purposes than experiential sharing
-   - Requests and questions have different intents than statements and declarations
-   - Professional communication follows different patterns than casual expression
-
-6. **Meta-Cognitive Approach**:
-   
-   **Continuous Self-Monitoring**:
-   - Am I getting trapped in keyword matching rather than meaning analysis?
-   - Am I considering the full spectrum of available labels or gravitating toward familiar ones?
-   - Am I maintaining appropriate confidence levels in my decisions?
-   - Am I adapting my approach based on the specific label set and domain?
-
-EXECUTION PROTOCOL:
-
-For each text, document your reasoning process internally:
-1. **Content Summary**: What is this text fundamentally about?
-2. **Purpose Identification**: Why does this text exist?
-3. **Label Consideration**: Which labels are potentially applicable and why?
-4. **Primary Selection**: Which label best captures the essential nature?
-5. **Verification**: Does this choice align with human expert judgment patterns?
-
-FINAL CLASSIFICATION STANDARD:
-Your label should represent what a consensus of human experts would choose after careful consideration. The label should capture the text's primary communicative function and content focus in a way that serves practical organizational and retrieval purposes.
-
-Remember: Excellence in classification comes from understanding meaning, context, and purpose - not from pattern matching or keyword detection. Think like a human expert who deeply understands both content and categorical systems.
+EXECUTION STANDARD:
+Your label should represent what expert human annotators would consensus-choose based on the text's primary communicative function and practical organizational value. Think meaning and purpose, not keyword matching.
 
 Total texts to process: {content_analysis.get('total_texts', 0)}
 """
@@ -292,15 +367,41 @@ Total texts to process: {content_analysis.get('total_texts', 0)}
             self.redis_client.update_job_status(job_id, "failed", 0.0, {"error": error_info})
             print(f"❌ Job {job_id} failed: {error_info}")
 
+    async def handle_cancellation(self, cancellation_data: dict):
+        """Handle job cancellation messages."""
+        try:
+            job_id = cancellation_data.get("job_id")
+            print(f"🚫 Mother AI processing cancellation for job {job_id}")
+            
+            # Update job status to cancelled if still processing
+            self.redis_client.update_job_status(job_id, "cancelled", 0.0, {"cancelled_by": "user"})
+            
+            # Forward cancellation to Text Agent
+            text_agent_cancellation = {
+                "job_id": job_id,
+                "action": "cancel",
+                "source": "mother_ai",
+                "timestamp": datetime.now().isoformat()
+            }
+            self.redis_client.publish_message("text_agent_cancellations", text_agent_cancellation)
+            
+            print(f"🚫 Job {job_id} cancellation processed by Mother AI")
+            
+        except Exception as e:
+            print(f"❌ Error handling cancellation: {e}")
+            import traceback
+            traceback.print_exc()
+
     async def listen_for_jobs(self):
         """Listen for incoming jobs and completion messages."""
         print("🎧 Mother AI listening for jobs and completions...")
         
         try:
-            # Subscribe to both channels
+            # Subscribe to all channels
             jobs_pubsub = self.redis_client.subscribe_channel("mother_ai_jobs")
             completion_pubsub = self.redis_client.subscribe_channel("mother_ai_queue")
-            print("✅ Mother AI subscribed to mother_ai_jobs and mother_ai_queue channels")
+            cancellation_pubsub = self.redis_client.subscribe_channel("job_cancellations")
+            print("✅ Mother AI subscribed to mother_ai_jobs, mother_ai_queue, and job_cancellations channels")
             
             while True:
                 try:
@@ -315,6 +416,12 @@ Total texts to process: {content_analysis.get('total_texts', 0)}
                     if completion_message:
                         print(f"📨 Mother AI received completion: {str(completion_message)[:100]}...")
                         await self.handle_completion(completion_message)
+                    
+                    # Check for cancellation messages
+                    cancellation_message = self.redis_client.get_message(cancellation_pubsub)
+                    if cancellation_message:
+                        print(f"🚫 Mother AI received cancellation: {str(cancellation_message)[:100]}...")
+                        await self.handle_cancellation(cancellation_message)
                     
                     # Small delay to prevent busy waiting
                     await asyncio.sleep(0.1)
@@ -335,6 +442,7 @@ Total texts to process: {content_analysis.get('total_texts', 0)}
             try:
                 jobs_pubsub.close()
                 completion_pubsub.close()
+                cancellation_pubsub.close()
             except:
                 pass
 
